@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import cv2
 import numpy as np
 import torch
@@ -8,10 +10,12 @@ import pyrealsense2 as rs
 import _init_paths
 import models
 import rospy
+from std_msgs.msg import String
 
 mean = [0.485, 0.456, 0.406]
 std = [0.229, 0.224, 0.225]
 color_map = [(0, 0, 0), (188, 113, 0), (24, 82, 216)]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Custom Input')
@@ -32,6 +36,7 @@ def input_transform(image):
     image /= std
     return image
 
+
 def load_pretrained(model, pretrained):
     pretrained_dict = torch.load(pretrained, map_location='cuda:0')
     if 'state_dict' in pretrained_dict:
@@ -43,11 +48,12 @@ def load_pretrained(model, pretrained):
     print(msg)
     print('Over!!!')
     model_dict.update(pretrained_dict)
-    model.load_state_dict(model_dict, strict = False)
+    model.load_state_dict(model_dict, strict=False)
     
     return model
 
-def draw_convexity_defects(image, roi, class_id):
+
+def draw_convexity_defects(image, roi, class_id, publisher):
     mask = np.zeros_like(roi, dtype=np.uint8)
     mask[roi == class_id] = 255
     contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -73,9 +79,15 @@ def draw_convexity_defects(image, roi, class_id):
         cY = int(M["m01"] / M["m00"])
     else:
         cX, cY = 0, 0
+    publisher.publish(f"{cX},{cY}")
+
     cv2.circle(image, (cX, cY), 7, [255, 0, 255], -1)
 
     return image
+
+
+def callback_request_next_target(msg):
+    rospy.loginfo(f"Received request for next target: {msg.data}")
 
 class RealSenseCapture:
     def __init__(self):
@@ -108,6 +120,7 @@ class RealSenseCapture:
     def release(self):
         self.pipeline.stop()
 
+
 class InferenceEngine:
     def __init__(self, model_path, model_type, n_class):
         self.model = self.load_pretrained(model_type, model_path, n_class).cuda()
@@ -134,13 +147,17 @@ class InferenceEngine:
         pred = torch.argmax(pred, dim=1).squeeze(0).cpu().numpy()
         return pred
 
+
 def main(args):
     rospy.init_node('segpredict_node')
+    center_point_pub = rospy.Publisher('center_point', String, queue_size=10)
+    rospy.Subscriber('request_next_target', String, callback_request_next_target)
+
     capture = RealSenseCapture()
     engine = InferenceEngine(args.model, args.model_type, args.n_class)
 
     try:
-        while True:
+        while not rospy.is_shutdown():
             frame_color = capture.get_color_frame()
             frame_depth = capture.get_depth_frame()
 
@@ -159,7 +176,7 @@ def main(args):
 
             target_class_id = color_map.index((188, 113, 0))
 
-            draw_convexity_defects(save_img, pred[2*height//3:], target_class_id)
+            draw_convexity_defects(save_img, pred[2*height//3:], target_class_id, center_point_pub)
 
             cv2.imshow("Result", save_img)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -167,6 +184,7 @@ def main(args):
     finally:
         capture.release()
         cv2.destroyAllWindows()
+
 
 if __name__ == '__main__':
     args = parse_args()
